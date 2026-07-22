@@ -12,13 +12,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from dotenv import load_dotenv
+
 
 # ==========================================
 # 0. INITIALIZATION
 # ==========================================
 # Load environment variables from local .env file
-load_dotenv()
+
 
 st.set_page_config(page_title="Enterprise Barber AI & CRM", layout="wide")
 
