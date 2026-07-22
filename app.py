@@ -17,11 +17,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 # 0. INITIALIZATION & SAFE ENV LOADING
 # ==========================================
 # Safely attempt to load local .env (Will not crash on Streamlit Cloud if missing)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+
 
 st.set_page_config(page_title="Enterprise Barber AI & CRM", layout="wide")
 
