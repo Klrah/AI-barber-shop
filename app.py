@@ -16,8 +16,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ==========================================
 # 0. INITIALIZATION & SAFE ENV LOADING
 # ==========================================
-# Safely attempt to load local .env (Will not crash on Streamlit Cloud if missing)
-
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 st.set_page_config(page_title="Enterprise Barber AI & CRM", layout="wide")
 
@@ -31,7 +34,6 @@ def get_secret(key: str, default: str) -> str:
 
 DATABASE_URL = get_secret("DATABASE_URL", "postgresql://mock_user:mock_pass@localhost/mock_db")
 
-# Automatically fix legacy 'postgres://' connection strings for SQLAlchemy 2.0
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -45,7 +47,6 @@ STABILITY_API_KEY = get_secret("STABILITY_API_KEY", "mock_key")
 # 2. IMAGE OPTIMIZATION HELPER
 # ==========================================
 def compress_and_resize_image(pil_image: Image.Image, max_dim: int = 512) -> Image.Image:
-    """Resizes PIL image so its longest side does not exceed max_dim."""
     img = pil_image.copy()
     img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     return img
@@ -84,7 +85,6 @@ BARBER_KNOWLEDGE_BASE = [
 ]
 
 def retrieve_rag_suggestion(face_shape: str, user_preference: str) -> str:
-    """Lightweight text retrieval using standard TF-IDF vectorization."""
     query = f"{face_shape} face shape preferring {user_preference}"
     corpus = BARBER_KNOWLEDGE_BASE + [query]
     
@@ -116,19 +116,16 @@ def upload_to_s3(image_bytes: bytes, filename: str) -> str:
 # 6. COMPUTER VISION & STABILITY AI INFERENCE
 # ==========================================
 def generate_hair_mask(image: Image.Image) -> Image.Image:
-    """Uses Haar Cascades to dynamically detect the face and target only the hair."""
     img_array = np.array(image.convert("RGB"))
     img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     
-    # 1. Safely download the Haar Cascade XML if it doesn't exist locally
     cascade_path = "haarcascade_frontalface_default.xml"
     if not os.path.exists(cascade_path):
         import urllib.request
         url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
         urllib.request.urlretrieve(url, cascade_path)
     
-    # 2. Load the cascade from the local file
     face_cascade = cv2.CascadeClassifier(cascade_path)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
     
@@ -136,28 +133,23 @@ def generate_hair_mask(image: Image.Image) -> Image.Image:
     mask = np.zeros((h, w), dtype=np.uint8)
     
     if len(faces) > 0:
-        # Sort to find the primary face box
         faces = sorted(faces, key=lambda x: x[2]*x[3], reverse=True)
         x, y, fw, fh = faces[0]
         
-        # Calculate crown position dynamically based on the facial bounding box
         center_x = x + int(fw / 2)
-        center_y = max(0, y - int(fh * 0.15)) # Shift precisely above the forehead
+        center_y = max(0, y - int(fh * 0.15)) 
         
         axes_x = int(fw * 0.65)
         axes_y = int(fh * 0.45)
         
         cv2.ellipse(mask, (center_x, center_y), (axes_x, axes_y), 0, 0, 360, 255, -1)
     else:
-        # Fallback math if no face is clearly detected
         cv2.ellipse(mask, (int(w/2), int(h*0.12)), (int(w*0.35), int(h*0.15)), 0, 0, 360, 255, -1)
         
-    # Massive 51px Gaussian Blur for a seamless, photorealistic skin blend
     mask_blur = cv2.GaussianBlur(mask, (51, 51), 0)
     return Image.fromarray(mask_blur)
 
 def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
-    """Uses Stability AI Developer API with advanced photorealistic constraints."""
     if STABILITY_API_KEY == "mock_key":
         st.error("🚨 API KEY MISSING: Add STABILITY_API_KEY to your Streamlit Secrets.")
         st.stop()
@@ -168,10 +160,7 @@ def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
     image.save(buf_img, format="PNG")
     mask.save(buf_mask, format="PNG")
     
-    # Force the model into a photographic latent space
     realistic_prompt = f"RAW photo, 8k uhd, dslr, highly detailed, {prompt}, natural hair texture, sharp focus, studio lighting"
-    
-    # Block artifacts, cartoons, and plastic textures
     negative_prompt = "cartoon, cg, 3d render, artificial, plastic skin, unnatural, deformed, bad anatomy, mutation"
     
     try:
@@ -238,8 +227,15 @@ with tab1:
                 prompt = f"Professional haircut, {style_pref}, {trimmer_length}mm guard fade on sides."
                 result_img = generate_haircut(input_img, prompt)
                 
-                st.image(result_img, caption="Generative AI Render", use_column_width=True)
-                
+                # --- NEW COMPACT LAYOUT START ---
+                # Places original and AI render side-by-side to keep the view scannable
+                view_col1, view_col2 = st.columns(2)
+                with view_col1:
+                    st.image(input_img, caption="Original Client Photo", use_container_width=True)
+                with view_col2:
+                    st.image(result_img, caption="Generative AI Render", use_container_width=True)
+                # --- NEW COMPACT LAYOUT END ---
+
                 # Generate Blueprint
                 blueprint = f"EXECUTION SPEC: Cut sides to {trimmer_length}mm. Top: {style_pref}. Face structure match: {face_shape}."
                 st.code(blueprint)
