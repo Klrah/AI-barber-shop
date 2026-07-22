@@ -12,22 +12,47 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from dotenv import load_dotenv
+
+# ==========================================
+# 0. INITIALIZATION
+# ==========================================
+# Load environment variables from local .env file
+load_dotenv()
 
 st.set_page_config(page_title="Enterprise Barber AI & CRM", layout="wide")
 
 # ==========================================
 # 1. CLOUD INFRASTRUCTURE & SECRETS SETUP
 # ==========================================
-# In Streamlit Cloud, set these in the dashboard under settings -> Secrets
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://mock_user:mock_pass@localhost/mock_db")
-AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "mock_key")
-AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "mock_secret")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-S3_BUCKET = os.getenv("S3_BUCKET_NAME", "mock-bucket")
-HF_API_TOKEN = os.getenv("HF_TOKEN", "mock_hf_token")
+def get_secret(key: str, default: str) -> str:
+    if hasattr(st, "secrets") and key in st.secrets:
+        return st.secrets[key]
+    return os.getenv(key, default)
+
+DATABASE_URL = get_secret("DATABASE_URL", "postgresql://mock_user:mock_pass@localhost/mock_db")
+
+# Automatically fix legacy 'postgres://' connection strings
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+AWS_ACCESS_KEY = get_secret("AWS_ACCESS_KEY_ID", "mock_key")
+AWS_SECRET_KEY = get_secret("AWS_SECRET_ACCESS_KEY", "mock_secret")
+AWS_REGION = get_secret("AWS_REGION", "us-east-1")
+S3_BUCKET = get_secret("S3_BUCKET_NAME", "mock-bucket")
+HF_API_TOKEN = get_secret("HF_TOKEN", "mock_hf_token")
 
 # ==========================================
-# 2. POSTGRESQL DATABASE LAYER (NEON.TECH)
+# 2. IMAGE OPTIMIZATION HELPER
+# ==========================================
+def compress_and_resize_image(pil_image: Image.Image, max_dim: int = 512) -> Image.Image:
+    """Resizes PIL image so its longest side does not exceed max_dim."""
+    img = pil_image.copy()
+    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return img
+
+# ==========================================
+# 3. POSTGRESQL DATABASE LAYER (NEON.TECH)
 # ==========================================
 try:
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -50,9 +75,8 @@ except Exception as e:
     st.sidebar.warning("Database not connected. Running in UI-only demo mode.")
 
 # ==========================================
-# 3. SMART RAG PIPELINE (CUSTOM IMPLEMENTATION)
+# 4. SMART RAG PIPELINE
 # ==========================================
-# Native implementation of Retrieval-Augmented Generation for style suggestions
 BARBER_KNOWLEDGE_BASE = [
     "Oval faces suit classic taper fades with short textured crops on top.",
     "Square faces look best with tight skin fades, buzz cuts, or structured crew cuts to highlight the jawline.",
@@ -68,7 +92,6 @@ def retrieve_rag_suggestion(face_shape: str, user_preference: str) -> str:
     vectorizer = TfidfVectorizer()
     tfidf_matrix = vectorizer.fit_transform(corpus)
     
-    # Compare query (last item) against knowledge base
     cosine_similarities = cosine_similarity(tfidf_matrix[-1], tfidf_matrix[:-1]).flatten()
     best_match_idx = cosine_similarities.argmax()
     
@@ -77,7 +100,7 @@ def retrieve_rag_suggestion(face_shape: str, user_preference: str) -> str:
     return "Standard recommendation: Classic mid-fade with textured top."
 
 # ==========================================
-# 4. AWS S3 IMAGE STORAGE
+# 5. AWS S3 IMAGE STORAGE
 # ==========================================
 def upload_to_s3(image_bytes: bytes, filename: str) -> str:
     if AWS_ACCESS_KEY == "mock_key":
@@ -91,7 +114,7 @@ def upload_to_s3(image_bytes: bytes, filename: str) -> str:
         return f"S3 Error: {str(e)}"
 
 # ==========================================
-# 5. COMPUTER VISION & AI INFERENCE
+# 6. COMPUTER VISION & AI INFERENCE
 # ==========================================
 def generate_hair_mask(image: Image.Image) -> Image.Image:
     img_array = np.array(image.convert("L"))
@@ -111,13 +134,32 @@ def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
     mask.save(buf_mask, format="PNG")
     
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-    files = {"image": ("image.png", buf_img.getvalue(), "image/png"), "mask_image": ("mask.png", buf_mask.getvalue(), "image/png")}
+    files = {
+        "image": ("image.png", buf_img.getvalue(), "image/png"), 
+        "mask_image": ("mask.png", buf_mask.getvalue(), "image/png")
+    }
     
-    res = requests.post("https://api-inference.huggingface.co/models/stable-diffusion-v1-5/stable-diffusion-inpainting", headers=headers, files=files, data={"inputs": prompt})
-    return Image.open(io.BytesIO(res.content)) if res.status_code == 200 else image
+    try:
+        res = requests.post(
+            "https://api-inference.huggingface.co/models/stable-diffusion-v1-5/stable-diffusion-inpainting", 
+            headers=headers, 
+            files=files, 
+            data={"inputs": prompt},
+            timeout=45
+        )
+        
+        if res.status_code == 200:
+            return Image.open(io.BytesIO(res.content))
+        else:
+            st.warning(f"⚠️ Hugging Face API returned status {res.status_code}. Returning original image.")
+            return image
+            
+    except requests.exceptions.RequestException:
+        st.error("⚠️ Network connection to AI provider failed. Please try again in a few moments.")
+        return image
 
 # ==========================================
-# 6. FRONTEND PORTAL
+# 7. FRONTEND PORTAL
 # ==========================================
 st.title("✂️ AI Barber Copilot & Enterprise CRM")
 
@@ -142,7 +184,10 @@ with tab1:
             st.error("Missing inputs.")
         else:
             with st.spinner("Processing rendering and persisting to AWS S3 / PostgreSQL..."):
-                input_img = Image.open(uploaded_file).convert("RGB")
+                raw_img = Image.open(uploaded_file).convert("RGB")
+                
+                # Immediately resize image to max 512px before processing
+                input_img = compress_and_resize_image(raw_img, max_dim=512)
                 
                 # Inference
                 prompt = f"Professional haircut, {style_pref}, {trimmer_length}mm guard fade on sides. Highly detailed."
@@ -153,9 +198,10 @@ with tab1:
                 blueprint = f"EXECUTION SPEC: Cut sides to {trimmer_length}mm. Top: {style_pref}. Face structure match: {face_shape}."
                 st.code(blueprint)
                 
-                # Upload to S3
+                # JPEG compression (quality=80) before AWS S3 upload
                 img_byte_arr = io.BytesIO()
-                result_img.save(img_byte_arr, format='JPEG')
+                result_img.save(img_byte_arr, format='JPEG', quality=80, optimize=True)
+                
                 s3_url = upload_to_s3(img_byte_arr.getvalue(), f"{client_phone}_{uuid.uuid4().hex[:6]}.jpg")
                 
                 # Persist to PostgreSQL
