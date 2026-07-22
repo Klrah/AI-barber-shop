@@ -78,7 +78,7 @@ except Exception as e:
     st.sidebar.warning("Database not connected. Running in UI-only demo mode.")
 
 # ==========================================
-# 4. NATIVE RAG PIPELINE 
+# 4. NATIVE RAG PIPELINE
 # ==========================================
 BARBER_KNOWLEDGE_BASE = [
     "Oval faces suit classic taper fades with short textured crops on top.",
@@ -125,8 +125,15 @@ def generate_hair_mask(image: Image.Image) -> Image.Image:
     img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     
-    # Use OpenCV's built-in ML face detector
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    # 1. Safely download the Haar Cascade XML if it doesn't exist locally
+    cascade_path = "haarcascade_frontalface_default.xml"
+    if not os.path.exists(cascade_path):
+        import urllib.request
+        url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        urllib.request.urlretrieve(url, cascade_path)
+    
+    # 2. Load the cascade from the local file
+    face_cascade = cv2.CascadeClassifier(cascade_path)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
     
     h, w = img_cv.shape[:2]
