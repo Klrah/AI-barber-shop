@@ -78,7 +78,7 @@ except Exception as e:
     st.sidebar.warning("Database not connected. Running in UI-only demo mode.")
 
 # ==========================================
-# 4. NATIVE RAG PIPELINE
+# 4. NATIVE RAG PIPELINE 
 # ==========================================
 BARBER_KNOWLEDGE_BASE = [
     "Oval faces suit classic taper fades with short textured crops on top.",
@@ -120,23 +120,56 @@ def upload_to_s3(image_bytes: bytes, filename: str) -> str:
 # 6. COMPUTER VISION & STABILITY AI INFERENCE
 # ==========================================
 def generate_hair_mask(image: Image.Image) -> Image.Image:
-    """Generates an OpenCV ellipse mask indicating the hair region."""
-    img_array = np.array(image.convert("L"))
-    h, w = img_array.shape[:2]
+    """Uses Haar Cascades to dynamically detect the face and target only the hair."""
+    img_array = np.array(image.convert("RGB"))
+    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    
+    # Use OpenCV's built-in ML face detector
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
+    
+    h, w = img_cv.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
-    center, axes = (int(w / 2), int(h * 0.25)), (int(w * 0.4), int(h * 0.25))
-    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
-    return Image.fromarray(mask)
+    
+    if len(faces) > 0:
+        # Sort to find the primary face box
+        faces = sorted(faces, key=lambda x: x[2]*x[3], reverse=True)
+        x, y, fw, fh = faces[0]
+        
+        # Calculate crown position dynamically based on the facial bounding box
+        center_x = x + int(fw / 2)
+        center_y = max(0, y - int(fh * 0.15)) # Shift precisely above the forehead
+        
+        axes_x = int(fw * 0.65)
+        axes_y = int(fh * 0.45)
+        
+        cv2.ellipse(mask, (center_x, center_y), (axes_x, axes_y), 0, 0, 360, 255, -1)
+    else:
+        # Fallback math if no face is clearly detected
+        cv2.ellipse(mask, (int(w/2), int(h*0.12)), (int(w*0.35), int(h*0.15)), 0, 0, 360, 255, -1)
+        
+    # Massive 51px Gaussian Blur for a seamless, photorealistic skin blend
+    mask_blur = cv2.GaussianBlur(mask, (51, 51), 0)
+    return Image.fromarray(mask_blur)
 
 def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
-    """Uses Stability AI Developer API to perform high-speed rendering."""
-    mask = generate_hair_mask(image)
+    """Uses Stability AI Developer API with advanced photorealistic constraints."""
     if STABILITY_API_KEY == "mock_key":
-        return image.convert("LA").convert("RGB") # Fallback if no key is found
+        st.error("🚨 API KEY MISSING: Add STABILITY_API_KEY to your Streamlit Secrets.")
+        st.stop()
+        
+    mask = generate_hair_mask(image)
     
     buf_img, buf_mask = io.BytesIO(), io.BytesIO()
     image.save(buf_img, format="PNG")
     mask.save(buf_mask, format="PNG")
+    
+    # Force the model into a photographic latent space
+    realistic_prompt = f"RAW photo, 8k uhd, dslr, highly detailed, {prompt}, natural hair texture, sharp focus, studio lighting"
+    
+    # Block artifacts, cartoons, and plastic textures
+    negative_prompt = "cartoon, cg, 3d render, artificial, plastic skin, unnatural, deformed, bad anatomy, mutation"
     
     try:
         res = requests.post(
@@ -150,7 +183,8 @@ def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
                 "mask": buf_mask.getvalue()
             },
             data={
-                "prompt": prompt,
+                "prompt": realistic_prompt,
+                "negative_prompt": negative_prompt,
                 "output_format": "jpeg",
             },
             timeout=30
@@ -159,12 +193,12 @@ def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
         if res.status_code == 200:
             return Image.open(io.BytesIO(res.content))
         else:
-            st.error(f"API Rejected Request. Reason: {res.json()}")
-            return image
+            st.error(f"API Rejected Request. Reason: {res.text}")
+            st.stop()
             
     except requests.exceptions.RequestException as e:
         st.error(f"Network connection failed: {str(e)}")
-        return image
+        st.stop()
 
 # ==========================================
 # 7. FRONTEND PORTAL
