@@ -2,6 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
+import requests
 import io
 import os
 import uuid
@@ -34,7 +35,7 @@ def get_secret(key: str, default: str) -> str:
 
 DATABASE_URL = get_secret("DATABASE_URL", "postgresql://mock_user:mock_pass@localhost/mock_db")
 
-# Automatically fix legacy 'postgres://' connection strings
+# Automatically fix legacy 'postgres://' connection strings for SQLAlchemy 2.0
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -42,6 +43,7 @@ AWS_ACCESS_KEY = get_secret("AWS_ACCESS_KEY_ID", "mock_key")
 AWS_SECRET_KEY = get_secret("AWS_SECRET_ACCESS_KEY", "mock_secret")
 AWS_REGION = get_secret("AWS_REGION", "us-east-1")
 S3_BUCKET = get_secret("S3_BUCKET_NAME", "mock-bucket")
+STABILITY_API_KEY = get_secret("STABILITY_API_KEY", "mock_key")
 
 # ==========================================
 # 2. IMAGE OPTIMIZATION HELPER
@@ -76,7 +78,7 @@ except Exception as e:
     st.sidebar.warning("Database not connected. Running in UI-only demo mode.")
 
 # ==========================================
-# 4. SMART RAG PIPELINE (NATIVE IMPLEMENTATION)
+# 4. NATIVE RAG PIPELINE
 # ==========================================
 BARBER_KNOWLEDGE_BASE = [
     "Oval faces suit classic taper fades with short textured crops on top.",
@@ -86,7 +88,7 @@ BARBER_KNOWLEDGE_BASE = [
 ]
 
 def retrieve_rag_suggestion(face_shape: str, user_preference: str) -> str:
-    """Lightweight RAG using TF-IDF vectorization and cosine similarity."""
+    """Lightweight text retrieval using standard TF-IDF vectorization."""
     query = f"{face_shape} face shape preferring {user_preference}"
     corpus = BARBER_KNOWLEDGE_BASE + [query]
     
@@ -115,42 +117,54 @@ def upload_to_s3(image_bytes: bytes, filename: str) -> str:
         return f"S3 Error: {str(e)}"
 
 # ==========================================
-# 6. COMPUTER VISION GENERATOR (BULLETPROOF)
+# 6. COMPUTER VISION & STABILITY AI INFERENCE
 # ==========================================
+def generate_hair_mask(image: Image.Image) -> Image.Image:
+    """Generates an OpenCV ellipse mask indicating the hair region."""
+    img_array = np.array(image.convert("L"))
+    h, w = img_array.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    center, axes = (int(w / 2), int(h * 0.25)), (int(w * 0.4), int(h * 0.25))
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+    return Image.fromarray(mask)
+
 def generate_haircut(image: Image.Image, prompt: str) -> Image.Image:
-    """
-    Alternative Local Processing: Uses OpenCV to generate a highly technical
-    'Blueprint Scan' of the client's face, bypassing flaky external APIs.
-    """
-    # Convert PIL image to OpenCV format (NumPy array)
-    img_array = np.array(image)
-    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    """Uses Stability AI Developer API to perform high-speed rendering."""
+    mask = generate_hair_mask(image)
+    if STABILITY_API_KEY == "mock_key":
+        return image.convert("LA").convert("RGB") # Fallback if no key is found
     
-    # Apply a Computer Vision edge-detection 'scan' effect
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 75, 150)
+    buf_img, buf_mask = io.BytesIO(), io.BytesIO()
+    image.save(buf_img, format="PNG")
+    mask.save(buf_mask, format="PNG")
     
-    # Create a digital blueprint overlay
-    edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    edges_colored[:, :, 1:] = 0 # Tint the edges blue/green for a tech look
-    
-    # Blend the scan with the original image
-    blended = cv2.addWeighted(img_cv, 0.6, edges_colored, 0.8, 0)
-    
-    # Draw targeting UI and metadata directly onto the image
-    height, width = blended.shape[:2]
-    cv2.rectangle(blended, (10, 10), (width-10, height-10), (0, 255, 0), 2)
-    cv2.putText(blended, "AI FACIAL SCAN: COMPLETE", (20, 40), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    
-    # Add a crosshair in the center
-    center_x, center_y = int(width/2), int(height/2)
-    cv2.line(blended, (center_x - 20, center_y), (center_x + 20, center_y), (0, 255, 0), 1)
-    cv2.line(blended, (center_x, center_y - 20), (center_x, center_y + 20), (0, 255, 0), 1)
-    
-    # Convert back to PIL Image so Streamlit and S3 can process it
-    final_img = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(final_img)
+    try:
+        res = requests.post(
+            "https://api.stability.ai/v2beta/stable-image/edit/inpaint",
+            headers={
+                "authorization": f"Bearer {STABILITY_API_KEY}",
+                "accept": "image/*"
+            },
+            files={
+                "image": buf_img.getvalue(),
+                "mask": buf_mask.getvalue()
+            },
+            data={
+                "prompt": prompt,
+                "output_format": "jpeg",
+            },
+            timeout=30
+        )
+        
+        if res.status_code == 200:
+            return Image.open(io.BytesIO(res.content))
+        else:
+            st.error(f"API Rejected Request. Reason: {res.json()}")
+            return image
+            
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network connection failed: {str(e)}")
+        return image
 
 # ==========================================
 # 7. FRONTEND PORTAL
@@ -177,17 +191,17 @@ with tab1:
         if not uploaded_file or not client_phone:
             st.error("Missing inputs.")
         else:
-            with st.spinner("Executing Local CV Processing and persisting to S3 / PostgreSQL..."):
+            with st.spinner("Processing generative rendering and persisting to S3 / PostgreSQL..."):
                 raw_img = Image.open(uploaded_file).convert("RGB")
                 
                 # Resize image to max 512px
                 input_img = compress_and_resize_image(raw_img, max_dim=512)
                 
-                # Execute OpenCV Blueprint Generation (Instant, Zero Network Dependency)
+                # Execute AI rendering pipeline
                 prompt = f"Professional haircut, {style_pref}, {trimmer_length}mm guard fade on sides."
                 result_img = generate_haircut(input_img, prompt)
                 
-                st.image(result_img, caption="Computer Vision Output (Blueprint Overlay)", use_column_width=True)
+                st.image(result_img, caption="Generative AI Render", use_column_width=True)
                 
                 # Generate Blueprint
                 blueprint = f"EXECUTION SPEC: Cut sides to {trimmer_length}mm. Top: {style_pref}. Face structure match: {face_shape}."
